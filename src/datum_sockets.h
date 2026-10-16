@@ -51,6 +51,8 @@ typedef struct T_DATUM_CLIENT_DATA T_DATUM_CLIENT_DATA;
 typedef void (*DATUM_ThreadPool_Init_Func)(T_DATUM_THREAD_DATA *);
 typedef void (*DATUM_ThreadPool_Loop_Func)(T_DATUM_THREAD_DATA *);
 typedef int (*DATUM_ThreadPool_ClientCmd_Func)(T_DATUM_CLIENT_DATA *, char *);
+// Raw byte handler: consumes from buffer/in_buf itself, returns < 0 to close the client
+typedef int (*DATUM_ThreadPool_ClientData_Func)(T_DATUM_CLIENT_DATA *);
 
 typedef void (*DATUM_ThreadPool_ClientClosed_Func)(T_DATUM_CLIENT_DATA *, const char *);
 typedef void (*DATUM_ThreadPool_ClientNew_Func)(T_DATUM_CLIENT_DATA *);
@@ -98,13 +100,17 @@ typedef struct {
 	// Called for each command the threadpool thread receives from a client
 	DATUM_ThreadPool_ClientCmd_Func client_cmd_func;
 	
+	// Binary protocols set this instead of client_cmd_func: called after each read with the raw bytes in the client buffer
+	DATUM_ThreadPool_ClientData_Func client_data_func;
+	
 	// Called each time a client is disconnected (either on purpose or via an error)
 	DATUM_ThreadPool_ClientClosed_Func closed_client_func;
 	
 	// Called each time a new client connects and is assigned to a threadpool thread
 	DATUM_ThreadPool_ClientNew_Func new_client_func;
 	
-	// TCP port this server will listen on
+	// Address and TCP port this server will listen on
+	const char *listen_addr;
 	int listen_port;
 	
 	// Maximum clients each thread can handle

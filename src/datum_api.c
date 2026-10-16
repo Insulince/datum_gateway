@@ -849,14 +849,53 @@ enum MHD_Result datum_api_thread_dashboard(struct MHD_Connection *connection) {
 	return datum_api_submit_uncached_response(connection, MHD_HTTP_OK, response);
 }
 
+// The clients-table cells from Last Accepted through Coinbase, shared by every stratum
+// protocol's rows. Returns the hashrate to add to the page total: estimates refreshed in
+// the last three minutes count.
+static double datum_api_client_share_cells(struct buf * const out, const uint64_t tsms, const T_DATUM_STRATUM_USER_STATS * const stats, const uint64_t vdiff, const uint64_t diff_accepted, const uint64_t count_accepted, const uint64_t diff_rejected, const uint64_t count_rejected, const unsigned int coinbase_index) {
+	double reject_pct = 0.0, hr;
+	
+	if (stats->last_share_tsms) {
+		buf_printf(out, "<TD>%.1fs</TD>", (double)(tsms - stats->last_share_tsms) / 1000.0);
+	} else {
+		buf_strcat(out, "<TD>N/A</TD>");
+	}
+	
+	buf_strcat(out, "<TD>");
+	buf_datum_format_difficulty(out, datum_pdiff_to_diff(vdiff));
+	buf_strcat(out, "</TD><TD>");
+	buf_datum_format_difficulty(out, datum_pdiff_to_diff(diff_accepted));
+	buf_printf(out, " (%"PRIu64")</TD>", count_accepted);
+	
+	if (diff_accepted > 0) {
+		reject_pct = ((double)diff_rejected / (double)(diff_accepted + diff_rejected))*100.0;
+	}
+	buf_strcat(out, "<TD>");
+	buf_datum_format_difficulty(out, datum_pdiff_to_diff(diff_rejected));
+	buf_printf(out, " (%"PRIu64") %.2f%%</TD>", count_rejected, reject_pct);
+	
+	hr = datum_stratum_stats_th_sec(stats);
+	if (diff_accepted > 0) {
+		buf_printf(out, "<TD>%.2f Th/s (%.1fs)</TD>", hr, (double)(tsms - stats->last_swap_tsms) / 1000.0);
+	} else {
+		buf_strcat(out, "<TD>N/A</TD>");
+	}
+	
+	if (coinbase_index < (sizeof(cbnames) / sizeof(cbnames[0]))) {
+		buf_printf(out, "<TD>%s</TD>", cbnames[coinbase_index]);
+	} else {
+		buf_strcat(out, "<TD>Unknown</TD>");
+	}
+	
+	return (((double)(tsms - stats->last_swap_tsms)/1000.0) < 180.0) ? hr : 0.0;
+}
+
 enum MHD_Result datum_api_client_dashboard(struct MHD_Connection *connection) {
 	struct MHD_Response *response;
 	size_t connected_clients = 0;
 	int i, j, ii;
 	T_DATUM_MINER_DATA *m = NULL;
 	uint64_t tsms;
-	double hr;
-	unsigned char astat;
 	double thr = 0.0;
 	
 	if (!datum_api_check_admin_password_httponly(connection, datum_api_create_response_authfail_clients)) {
@@ -894,45 +933,7 @@ enum MHD_Result datum_api_client_dashboard(struct MHD_Connection *connection) {
 				if (m->subscribed) {
 					buf_printf(&output, "<TD> <span style=\"font-family: monospace;\">%4.4x</span> %.1fs</TD>", m->sid, (double)(tsms - m->subscribe_tsms) / 1000.0);
 					
-					if (m->stats.last_share_tsms) {
-						buf_printf(&output, "<TD>%.1fs</TD>", (double)(tsms - m->stats.last_share_tsms) / 1000.0);
-					} else {
-						buf_strcat(&output, "<TD>N/A</TD>");
-					}
-					
-					buf_strcat(&output, "<TD>");
-					buf_datum_format_difficulty(&output, datum_pdiff_to_diff(m->current_diff));
-					buf_strcat(&output, "</TD><TD>");
-					buf_datum_format_difficulty(&output, datum_pdiff_to_diff(m->share_diff_accepted));
-					buf_printf(&output, " (%"PRIu64")</TD>", m->share_count_accepted);
-					
-					hr = 0.0;
-					if (m->share_diff_accepted > 0) {
-						hr = ((double)m->share_diff_rejected / (double)(m->share_diff_accepted + m->share_diff_rejected))*100.0;
-					}
-					buf_strcat(&output, "<TD>");
-					buf_datum_format_difficulty(&output, datum_pdiff_to_diff(m->share_diff_rejected));
-					buf_printf(&output, " (%"PRIu64") %.2f%%</TD>", m->share_count_rejected, hr);
-					
-					astat = m->stats.active_index?0:1; // inverted
-					hr = 0.0;
-					if ((m->stats.last_swap_ms > 0) && (m->stats.diff_accepted[astat] > 0)) {
-						hr = ((double)m->stats.diff_accepted[astat] / (double)((double)m->stats.last_swap_ms/1000.0)) * 0.004294967296; // Th/sec based on shares/sec
-					}
-					if (((double)(tsms - m->stats.last_swap_tsms)/1000.0) < 180.0) {
-						thr += hr;
-					}
-					if (m->share_diff_accepted > 0) {
-						buf_printf(&output, "<TD>%.2f Th/s (%.1fs)</TD>", hr, (double)(tsms - m->stats.last_swap_tsms) / 1000.0);
-					} else {
-						buf_strcat(&output, "<TD>N/A</TD>");
-					}
-					
-					if (m->coinbase_selection < (sizeof(cbnames) / sizeof(cbnames[0]))) {
-						buf_printf(&output, "<TD>%s</TD>", cbnames[m->coinbase_selection]);
-					} else {
-						buf_strcat(&output, "<TD>Unknown</TD>");
-					}
+					thr += datum_api_client_share_cells(&output, tsms, &m->stats, m->current_diff, m->share_diff_accepted, m->share_count_accepted, m->share_diff_rejected, m->share_count_rejected, m->coinbase_selection);
 					
 					buf_strcat(&output, "<TD>");
 					buf_strcat_html_escape(&output, m->useragent);

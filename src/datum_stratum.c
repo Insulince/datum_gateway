@@ -165,8 +165,9 @@ void *datum_stratum_v1_socket_server(void *arg) {
 	app->closed_client_func = datum_stratum_v1_socket_thread_client_closed;
 	app->new_client_func = datum_stratum_v1_socket_thread_client_new;
 	
-	// set listen port
+	// set listen address and port
 	app->listen_port = datum_config.stratum_v1_listen_port;
+	app->listen_addr = datum_config.stratum_v1_listen_addr;
 	
 	// setup limits
 	app->max_clients_thread = datum_config.stratum_v1_max_clients_per_thread;
@@ -910,23 +911,32 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 
 #define STAT_CYCLE_MS 60000
 
-void stratum_update_miner_stats_accepted(T_DATUM_CLIENT_DATA *c, uint64_t diff_accepted) {
-	T_DATUM_MINER_DATA * const m = c->app_client_data;
+void datum_stratum_stats_accepted(T_DATUM_STRATUM_USER_STATS *stats, uint64_t diff_accepted, uint64_t now_tsms) {
+	stats->diff_accepted[stats->active_index?1:0] += diff_accepted;
+	stats->last_share_tsms = now_tsms;
 	
-	m->stats.diff_accepted[m->stats.active_index?1:0] += diff_accepted;
-	m->stats.last_share_tsms = m->sdata->loop_tsms;
-	
-	if (m->sdata->loop_tsms >= (m->stats.last_swap_tsms+STAT_CYCLE_MS)) {
-		m->stats.last_swap_ms = m->sdata->loop_tsms - m->stats.last_swap_tsms;
-		m->stats.last_swap_tsms = m->sdata->loop_tsms;
-		if (m->stats.active_index) {
-			m->stats.active_index = 0;
-			m->stats.diff_accepted[0] = 0;
+	if (now_tsms >= (stats->last_swap_tsms+STAT_CYCLE_MS)) {
+		stats->last_swap_ms = now_tsms - stats->last_swap_tsms;
+		stats->last_swap_tsms = now_tsms;
+		if (stats->active_index) {
+			stats->active_index = 0;
+			stats->diff_accepted[0] = 0;
 		} else {
-			m->stats.active_index = 1;
-			m->stats.diff_accepted[1] = 0;
+			stats->active_index = 1;
+			stats->diff_accepted[1] = 0;
 		}
 	}
+}
+
+double datum_stratum_stats_th_sec(const T_DATUM_STRATUM_USER_STATS *stats) {
+	const unsigned char astat = stats->active_index?0:1; // the completed half
+	if ((stats->last_swap_ms == 0) || (stats->diff_accepted[astat] == 0)) return 0.0;
+	return ((double)stats->diff_accepted[astat] / (double)((double)stats->last_swap_ms/1000.0)) * 0.004294967296; // Th/sec based on shares/sec
+}
+
+void stratum_update_miner_stats_accepted(T_DATUM_CLIENT_DATA *c, uint64_t diff_accepted) {
+	T_DATUM_MINER_DATA * const m = c->app_client_data;
+	datum_stratum_stats_accepted(&m->stats, diff_accepted, m->sdata->loop_tsms);
 }
 
 bool stratum_get_job(const T_DATUM_MINER_DATA * const m, const json_t * const job_id, T_DATUM_STRATUM_JOB ** const out_job, uint16_t * const out_job_index, bool * const out_quickdiff, bool * const out_empty_work, uint64_t * const out_job_diff, const uint8_t ** const out_job_target, unsigned char * const out_coinbase_index) {
@@ -1032,18 +1042,145 @@ const char *datum_stratum_mod_username(const char *username_s, char * const user
 	return username_buf;
 }
 
+void datum_stratum_count_share(bool accepted, uint64_t diff) {
+	if (accepted) {
+		__atomic_add_fetch(&stratum_client_accepted_share_count, 1, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&stratum_client_accepted_share_diff, diff, __ATOMIC_RELAXED);
+	} else {
+		__atomic_add_fetch(&stratum_client_rejected_share_count, 1, __ATOMIC_RELAXED);
+		__atomic_add_fetch(&stratum_client_rejected_share_diff, diff, __ATOMIC_RELAXED);
+	}
+}
+
 static void stratum_note_share(T_DATUM_MINER_DATA *m, bool accepted, uint64_t diff) {
 	if (accepted) {
 		m->share_count_accepted++;
 		m->share_diff_accepted += diff;
-		__atomic_add_fetch(&stratum_client_accepted_share_count, 1, __ATOMIC_RELAXED);
-		__atomic_add_fetch(&stratum_client_accepted_share_diff, diff, __ATOMIC_RELAXED);
 	} else {
 		m->share_count_rejected++;
 		m->share_diff_rejected += diff;
-		__atomic_add_fetch(&stratum_client_rejected_share_count, 1, __ATOMIC_RELAXED);
-		__atomic_add_fetch(&stratum_client_rejected_share_diff, diff, __ATOMIC_RELAXED);
 	}
+	datum_stratum_count_share(accepted, diff);
+}
+
+bool datum_stratum_share_work(const T_DATUM_STRATUM_JOB *job, const unsigned char *full_cb_txn, size_t full_cb_len, bool empty_work, const unsigned char *extranonce_bin, const unsigned char *nonce8, const unsigned char *ntime8, unsigned char *work) {
+	unsigned char commitment[32];
+	unsigned char root[32];
+	
+	if (job->target_pot_index < 0 || full_cb_len <= (size_t)job->target_pot_index) return false;
+	if (!datum_stratum_job_blake2b_commitment_from_txn(job, full_cb_txn,
+		full_cb_len, full_cb_txn[job->target_pot_index], empty_work, commitment)) {
+		return false;
+	}
+	if (!datum_blake2b_work_root(root, commitment, extranonce_bin)) return false;
+	datum_blake2b_build_work_header(work, job->prevhash_bin, nonce8, ntime8, root);
+	return true;
+}
+
+T_DATUM_SHARE_RESULT datum_stratum_check_share(const T_DATUM_SHARE *s, T_DATUM_SHARE_OUTCOME *o) {
+	T_DATUM_STRATUM_JOB * const job = s->job;
+	unsigned char block_header[80];
+	unsigned char share_hash[40];
+	char new_notify_blockhash[65];
+	uint64_t check_time;
+	int i;
+	
+	o->was_block = false;
+	o->username = s->username;
+	
+	if (!datum_stratum_share_work(job, s->full_cb_txn, s->full_cb_len, s->empty_work, s->extranonce_bin, s->nonce8, s->ntime8, block_header)) {
+		return DATUM_SHARE_INVALID;
+	}
+	if (!datum_blake2b_pow_hash_le(share_hash, block_header, (const unsigned char[16]){0}, 0)) {
+		return DATUM_SHARE_INVALID;
+	}
+	memcpy(o->hash, share_hash, 32);
+	if (upk_u32le(share_hash, 28) != 0) {
+		return DATUM_SHARE_H_NOT_ZERO;
+	}
+	
+	if (datum_config.stratum_username_mod) {
+		// up to the first NUL, as SV1 has always looked
+		const char * const tilde = memchr(s->username, '~', strnlen(s->username, s->username_len));
+		if (tilde) {
+			const char * const modname = &tilde[1];
+			const size_t modname_len = s->username_len - (size_t)(modname - s->username);
+			const uint16_t share_rnd = upk_u16le(share_hash, 0);
+			o->username = datum_stratum_mod_username(s->username, o->username_buf, sizeof(o->username_buf), share_rnd, modname, modname_len);
+		}
+	}
+	
+	if (datum_stratum_share_is_unmasked_block(job, share_hash)) {
+		o->was_block = true;
+		new_notify_blockhash[64] = 0;
+		for(i=0;i<32;i++) {
+			uchar_to_hex(&new_notify_blockhash[(31-i)<<1], share_hash[i]);
+		}
+		DLOG_WARN("************************************************************************************************");
+		DLOG_WARN("******** BLOCK FOUND - %s ********", new_notify_blockhash);
+		DLOG_WARN("************************************************************************************************");
+	
+		if (job->is_datum_job) {
+			(void)datum_protocol_pow_submit(s->c, job, o->username, true,
+				s->empty_work, s->quickdiff, block_header, s->job_diff,
+				s->full_cb_txn, s->full_cb_len, share_hash, s->cb,
+				s->extranonce_bin, s->coinbase_index);
+		}
+	
+		i = assembleBlockAndSubmit(block_header, s->full_cb_txn,
+			s->full_cb_len, job, s->sdata, new_notify_blockhash,
+			s->empty_work, s->extranonce_bin);
+		if (i) {
+			datum_blocktemplates_notifynew(new_notify_blockhash, job->height + 1);
+		}
+	}
+	
+	// For ABW work the XOR key is withheld, so only Apex can classify a
+	// network candidate before disclosure.
+	if (job->is_stale_prevblock) {
+		// share is from a stale job
+		return DATUM_SHARE_STALE_BLOCK;
+	}
+	
+	// check if ntime is within bounds for a valid block
+	// we'll do this after we try and potential blocks found with bad times, just in case
+	// For a header-v2 job the node does not read the wire time as nTime: it
+	// adds the hasher's time-offset bytes back when the offset flag is set.
+	// Bound what the node will read, which also bounds hasher time rolling.
+	check_time = datum_blake2b_share_ntime(job->blake2b_time_on_wire, s->ntime8, job->blake2b_flags);
+	if (check_time < job->block_template->mintime) {
+		return DATUM_SHARE_TIME_TOO_OLD;
+	}
+	if (check_time > (job->block_template->curtime + 7200)) {
+		return DATUM_SHARE_TIME_TOO_NEW;
+	}
+	
+	// check if share beats miner's work target
+	if (compare_hashes(share_hash, s->target) > 0) {
+		// bad target diff
+		return DATUM_SHARE_HIGH_HASH;
+	}
+	
+	// check if stale
+	if (s->sdata->loop_tsms > (job->tsms + ((datum_config.stratum_v1_share_stale_seconds + datum_config.bitcoind_work_update_seconds) * 1000))) {
+		// share is from a stale job
+		return DATUM_SHARE_STALE;
+	}
+	
+	// check if duplicate submission
+	if (datum_stratum_check_for_dupe(s->sdata, share_hash, job->tsms)) {
+		return DATUM_SHARE_DUPLICATE;
+	}
+	
+	// work accepted
+	if (job->is_datum_job && !o->was_block && datum_protocol_pow_submit(s->c, job,
+		o->username, false, s->empty_work, s->quickdiff, block_header, s->job_diff, s->full_cb_txn,
+		s->full_cb_len, share_hash, s->cb, s->extranonce_bin,
+		s->coinbase_index) != 0) {
+		return DATUM_SHARE_INVALID;
+	}
+	
+	return DATUM_SHARE_ACCEPTED;
 }
 
 int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj) {
@@ -1069,7 +1206,6 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	T_DATUM_STRATUM_JOB *job = NULL;
 	
 	const char *username_s;
-	char username_buf[0x100];
 	const char *extranonce2_s;
 	const char *ntime_s;
 	const char *nonce_s;
@@ -1077,25 +1213,17 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	uint16_t g_job_index;
 	uint32_t ntime_val;
 	uint32_t nonce_val;
-	uint64_t check_time;
 	size_t ntime_len, nonce_len;
 	unsigned char ntime8[8] = {0};
 	unsigned char nonce8[8] = {0};
-	unsigned char work[80];
-	unsigned char root[32];
-	unsigned char blake2b_commitment[32];
 	unsigned char coinbase_index = 0;
 	T_DATUM_STRATUM_COINBASE *cb = NULL;
 	unsigned char extranonce_bin[12];
 	
-	unsigned char block_header[80];
-	unsigned char share_hash[40];
 	unsigned char full_cb_txn[MAX_COINBASE_TXN_SIZE_BYTES];
 	int i;
 	bool quickdiff;
 	bool empty_work;
-	bool was_block = false;
-	char new_notify_blockhash[65];
 	
 	uint64_t job_diff;
 	const uint8_t *work_target;
@@ -1194,33 +1322,6 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		nonce_val = upk_u32le(nonce8, 0);
 	}
 	
-	const size_t full_cb_txn_size =
-		(size_t)cb->coinb1_len + 12 + (size_t)cb->coinb2_len;
-	const unsigned char target_pot = full_cb_txn[job->target_pot_index];
-	if (!datum_stratum_job_blake2b_commitment_from_txn(job, full_cb_txn,
-		full_cb_txn_size, target_pot, empty_work, blake2b_commitment)) {
-		send_unknown_work_error(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	if (!datum_blake2b_work_root(root, blake2b_commitment, extranonce_bin)) {
-		send_unknown_work_error(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	datum_blake2b_build_work_header(work, job->prevhash_bin, nonce8, ntime8, root);
-	memcpy(block_header, work, 80);
-	if (!datum_blake2b_pow_hash_le(share_hash, work, (const unsigned char[16]){0}, 0)) {
-		send_unknown_work_error(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	if (upk_u32le(share_hash, 28) != 0) {
-		send_rejected_hnotzero_error(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	
 	username = json_array_get(params_obj, 0);
 	if (!username) {
 		username_s = (const char *)"NULL";
@@ -1231,96 +1332,37 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		}
 	}
 	
-	if (datum_config.stratum_username_mod) {
-		const char * const tilde = strchr(username_s, '~');
-		if (tilde) {
-			const char * const modname = &tilde[1];
-			const size_t modname_len = json_string_length(username) - (modname - username_s);
-			const uint16_t share_rnd = upk_u16le(share_hash, 0);
-			username_s = datum_stratum_mod_username(username_s, username_buf, sizeof(username_buf), share_rnd, modname, modname_len);
+	const T_DATUM_SHARE share = {
+		.c = c,
+		.job = job,
+		.sdata = m->sdata,
+		.username = username_s,
+		.username_len = username ? json_string_length(username) : strlen(username_s), // 0 for a non-string, which has no modifier
+		.full_cb_txn = full_cb_txn,
+		.full_cb_len = (size_t)cb->coinb1_len + 12 + (size_t)cb->coinb2_len,
+		.cb = cb,
+		.extranonce_bin = extranonce_bin,
+		.nonce8 = nonce8,
+		.ntime8 = ntime8,
+		.coinbase_index = coinbase_index,
+		.empty_work = empty_work,
+		.quickdiff = quickdiff,
+		.job_diff = job_diff,
+		.target = work_target,
+	};
+	T_DATUM_SHARE_OUTCOME outcome;
+	const T_DATUM_SHARE_RESULT result = datum_stratum_check_share(&share, &outcome);
+	if (result != DATUM_SHARE_ACCEPTED) {
+		switch (result) {
+			case DATUM_SHARE_H_NOT_ZERO: send_rejected_hnotzero_error(c, id); break;
+			case DATUM_SHARE_STALE_BLOCK: send_rejected_stale_block(c, id); break;
+			case DATUM_SHARE_TIME_TOO_OLD: send_rejected_time_too_old(c, id); break;
+			case DATUM_SHARE_TIME_TOO_NEW: send_rejected_time_too_new(c, id); break;
+			case DATUM_SHARE_HIGH_HASH: send_rejected_high_hash_error(c, id); break;
+			case DATUM_SHARE_STALE: send_rejected_stale(c, id); break;
+			case DATUM_SHARE_DUPLICATE: send_rejected_duplicate(c, id); break;
+			default: send_unknown_work_error(c, id); break;
 		}
-	}
-	
-	if (datum_stratum_share_is_unmasked_block(job, share_hash)) {
-		was_block = true;
-		new_notify_blockhash[64] = 0;
-		for(i=0;i<32;i++) {
-			uchar_to_hex(&new_notify_blockhash[(31-i)<<1], share_hash[i]);
-		}
-		DLOG_WARN("************************************************************************************************");
-		DLOG_WARN("******** BLOCK FOUND - %s ********", new_notify_blockhash);
-		DLOG_WARN("************************************************************************************************");
-		
-		if (job->is_datum_job) {
-			(void)datum_protocol_pow_submit(c, job, username_s, true,
-				empty_work, quickdiff, block_header, job_diff,
-				full_cb_txn, full_cb_txn_size, share_hash, cb,
-				extranonce_bin, coinbase_index);
-		}
-		
-		i = assembleBlockAndSubmit(block_header, full_cb_txn,
-			full_cb_txn_size, job, m->sdata, new_notify_blockhash,
-			empty_work, extranonce_bin);
-		if (i) {
-			datum_blocktemplates_notifynew(new_notify_blockhash, job->height + 1);
-		}
-	}
-	
-	// For ABW work the XOR key is withheld, so only Apex can classify a
-	// network candidate before disclosure.
-	if (job->is_stale_prevblock) {
-		// share is from a stale job
-		send_rejected_stale_block(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	
-	// check if ntime is within bounds for a valid block
-	// we'll do this after we try and potential blocks found with bad times, just in case
-	// For a header-v2 job the node does not read the wire time as nTime: it
-	// adds the hasher's time-offset bytes back when the offset flag is set.
-	// Bound what the node will read, which also bounds hasher time rolling.
-	check_time = datum_blake2b_share_ntime(job->blake2b_time_on_wire, ntime8, job->blake2b_flags);
-	if (check_time < job->block_template->mintime) {
-		send_rejected_time_too_old(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	if (check_time > (job->block_template->curtime + 7200)) {
-		send_rejected_time_too_new(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	
-	// check if share beats miner's work target
-	if (compare_hashes(share_hash, work_target) > 0) {
-		// bad target diff
-		send_rejected_high_hash_error(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	
-	// check if stale
-	if (m->sdata->loop_tsms > (job->tsms + ((datum_config.stratum_v1_share_stale_seconds + datum_config.bitcoind_work_update_seconds) * 1000))) {
-		// share is from a stale job
-		send_rejected_stale(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	
-	// check if duplicate submission
-	if (datum_stratum_check_for_dupe(m->sdata, share_hash, job->tsms)) {
-		send_rejected_duplicate(c, id);
-		stratum_note_share(m, false, job_diff);
-		return 0;
-	}
-	
-	// work accepted
-	if (job->is_datum_job && !was_block && datum_protocol_pow_submit(c, job,
-		username_s, false, empty_work, quickdiff, block_header, job_diff, full_cb_txn,
-		full_cb_txn_size, share_hash, cb, extranonce_bin,
-		coinbase_index) != 0) {
-		send_unknown_work_error(c, id);
 		stratum_note_share(m, false, job_diff);
 		return 0;
 	}

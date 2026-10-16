@@ -100,7 +100,7 @@ void *datum_threadpool_thread(void *arg) {
 	int i, nfds, n, cidx, j;
 	size_t leftover = 0;
 	
-	if (!my->app->client_cmd_func) {
+	if (!my->app->client_cmd_func && !my->app->client_data_func) {
 		DLOG_FATAL("Thread pool thread started with no client command function pointer. :(");
 		panic_from_thread(__LINE__);
 		return 0;
@@ -257,6 +257,17 @@ void *datum_threadpool_thread(void *arg) {
 							
 							// call closed client function, if any
 							if (my->app->closed_client_func) my->app->closed_client_func(&my->client_data[cidx], "client closed connection");
+							
+							datum_socket_thread_client_count_decrement(my, cidx, true);
+						}
+					} else if (my->app->client_data_func) {
+						my->client_data[cidx].in_buf += n;
+						if (my->app->client_data_func(&my->client_data[cidx]) < 0) {
+							epoll_ctl(my->epollfd, EPOLL_CTL_DEL, my->client_data[cidx].fd, NULL);
+							close(my->client_data[cidx].fd);
+							
+							// call closed client function, if any
+							if (my->app->closed_client_func) my->app->closed_client_func(&my->client_data[cidx], "client_data_func returned error");
 							
 							datum_socket_thread_client_count_decrement(my, cidx, true);
 						}
@@ -680,7 +691,7 @@ void *datum_gateway_listener_thread(void *arg) {
 		return NULL;
 	}
 	
-	DLOG_DEBUG("Setting up app '%s' on address %s port %d. (T:%d/TC:%d/C:%d)", app->name, datum_config.stratum_v1_listen_addr[0] ? datum_config.stratum_v1_listen_addr : "(any)", app->listen_port, app->max_threads, app->max_clients_thread, app->max_clients);
+	DLOG_DEBUG("Setting up app '%s' on address %s port %d. (T:%d/TC:%d/C:%d)", app->name, (app->listen_addr && app->listen_addr[0]) ? app->listen_addr : "(any)", app->listen_port, app->max_threads, app->max_clients_thread, app->max_clients);
 	
 	// we assume the caller sets up the thread data in some way
 	// don't clobber those pointers
@@ -702,7 +713,7 @@ void *datum_gateway_listener_thread(void *arg) {
 	app->datum_active_threads = 0;
 	
 	size_t listen_socks_len = 2;
-	if (!datum_sockets_setup_listening_sockets("stratum", datum_config.stratum_v1_listen_addr, app->listen_port, listen_socks, &listen_socks_len)) {
+	if (!datum_sockets_setup_listening_sockets(app->name, app->listen_addr ? app->listen_addr : "", app->listen_port, listen_socks, &listen_socks_len)) {
 		return NULL;
 	}
 	if (listen_socks_len < 2) listen_socks[1] = -1;

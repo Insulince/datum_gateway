@@ -690,6 +690,56 @@ void datum_stratum_mod_username_tests() {
 	datum_test(0 == strcmp(res, "def.ghi"));
 }
 
+// Per-miner accepted work, kept in two halves swapped each minute; the hashrate comes from the completed half
+static void datum_stratum_stats_tests(void) {
+	T_DATUM_STRATUM_USER_STATS st = {0};
+	double want, got;
+	
+	st.last_swap_tsms = 1000;
+	datum_stratum_stats_accepted(&st, 4, 2000);
+	datum_test(st.last_share_tsms == 2000 && st.diff_accepted[0] == 4 && st.active_index == 0);
+	datum_test(datum_stratum_stats_th_sec(&st) == 0.0); // no completed half yet
+	
+	datum_stratum_stats_accepted(&st, 6, 61000);
+	datum_test(st.active_index == 1 && st.last_swap_ms == 60000 && st.last_swap_tsms == 61000 && st.diff_accepted[1] == 0);
+	want = (10.0 / 60.0) * 0.004294967296;
+	got = datum_stratum_stats_th_sec(&st);
+	datum_test(got > want * 0.999999 && got < want * 1.000001);
+	
+	datum_stratum_stats_accepted(&st, 3, 62000);
+	datum_test(st.diff_accepted[1] == 3 && datum_stratum_stats_th_sec(&st) == got); // the open half does not count yet
+	
+	datum_stratum_stats_accepted(&st, 1, 121000);
+	datum_test(st.active_index == 0 && st.diff_accepted[0] == 0 && st.last_swap_ms == 60000);
+	want = (4.0 / 60.0) * 0.004294967296;
+	got = datum_stratum_stats_th_sec(&st);
+	datum_test(got > want * 0.999999 && got < want * 1.000001);
+}
+
+// Gateway-wide share totals, counted for every protocol's shares
+static void datum_stratum_count_share_tests(void) {
+	const uint64_t a = stratum_client_accepted_share_count, ad = stratum_client_accepted_share_diff;
+	const uint64_t r = stratum_client_rejected_share_count, rd = stratum_client_rejected_share_diff;
+	
+	datum_stratum_count_share(true, 64);
+	datum_stratum_count_share(false, 8);
+	datum_stratum_count_share(false, 2);
+	datum_test(stratum_client_accepted_share_count == a + 1 && stratum_client_accepted_share_diff == ad + 64);
+	datum_test(stratum_client_rejected_share_count == r + 2 && stratum_client_rejected_share_diff == rd + 10);
+}
+
+// A share's work cannot be built from a coinbase too short to hold the difficulty byte
+static void datum_stratum_share_work_bounds_tests(void) {
+	static T_DATUM_STRATUM_JOB job;
+	unsigned char cb[64] = {0}, en[12] = {0}, nonce8[8] = {0}, ntime8[8] = {0}, work[80];
+	
+	memset(&job, 0, sizeof(job));
+	job.target_pot_index = 50;
+	datum_test(!datum_stratum_share_work(&job, cb, 50, false, en, nonce8, ntime8, work));
+	job.target_pot_index = -1;
+	datum_test(!datum_stratum_share_work(&job, cb, sizeof(cb), false, en, nonce8, ntime8, work));
+}
+
 void datum_stratum_tests(void) {
 	datum_stratum_mod_username_tests();
 	datum_stratum_minimum_difficulty_configure_tests();
@@ -704,4 +754,7 @@ void datum_stratum_tests(void) {
 	datum_stratum_abw_block_request_tests();
 	datum_blake2b_refresh_time_offset_tests();
 	datum_block_coinbase_witness_tests();
+	datum_stratum_stats_tests();
+	datum_stratum_count_share_tests();
+	datum_stratum_share_work_bounds_tests();
 }

@@ -275,6 +275,60 @@ bool datum_stratum_job_blake2b_commitment_from_txn(const T_DATUM_STRATUM_JOB *s,
 bool datum_stratum_job_blake2b_commitment(T_DATUM_STRATUM_JOB *s, const T_DATUM_STRATUM_COINBASE *cb, bool subsidy_only, unsigned char pot, unsigned char *commitment, unsigned char *coinb1);
 bool datum_stratum_share_is_unmasked_block(
 	const T_DATUM_STRATUM_JOB *job, const unsigned char *share_hash);
+// The 80-byte work a share describes: the commitment its coinbase makes, rooted with its
+// extranonce, then the job's prev hash and the share's nonce and time bytes.
+bool datum_stratum_share_work(const T_DATUM_STRATUM_JOB *job, const unsigned char *full_cb_txn, size_t full_cb_len, bool empty_work, const unsigned char *extranonce_bin, const unsigned char *nonce8, const unsigned char *ntime8, unsigned char *work);
+
+// Outcome of the share checks shared by every stratum protocol
+typedef enum {
+	DATUM_SHARE_ACCEPTED = 0,
+	DATUM_SHARE_H_NOT_ZERO,
+	DATUM_SHARE_STALE_BLOCK,
+	DATUM_SHARE_TIME_TOO_OLD,
+	DATUM_SHARE_TIME_TOO_NEW,
+	DATUM_SHARE_HIGH_HASH,
+	DATUM_SHARE_STALE,
+	DATUM_SHARE_DUPLICATE,
+	DATUM_SHARE_INVALID, // could not be evaluated, or the pool refused it (reported as unknown-work)
+} T_DATUM_SHARE_RESULT;
+
+// A share with its full coinbase assembled
+typedef struct {
+	const T_DATUM_CLIENT_DATA *c;
+	T_DATUM_STRATUM_JOB *job;
+	T_DATUM_STRATUM_THREADPOOL_DATA *sdata;
+	const char *username; // as submitted; username modifiers are applied here
+	size_t username_len;
+	unsigned char *full_cb_txn;
+	size_t full_cb_len;
+	const T_DATUM_STRATUM_COINBASE *cb;
+	unsigned char *extranonce_bin; // 12 bytes
+	const unsigned char *nonce8;
+	const unsigned char *ntime8;
+	unsigned char coinbase_index;
+	bool empty_work;
+	bool quickdiff;
+	uint64_t job_diff;
+	const unsigned char *target; // the share must meet this
+} T_DATUM_SHARE;
+
+// What the checks found besides the verdict: the share's hash (little-endian), whether it
+// was a block, and the username after any modifier (may point into username_buf)
+typedef struct {
+	unsigned char hash[32];
+	bool was_block;
+	const char *username;
+	char username_buf[0x100];
+} T_DATUM_SHARE_OUTCOME;
+
+T_DATUM_SHARE_RESULT datum_stratum_check_share(const T_DATUM_SHARE *s, T_DATUM_SHARE_OUTCOME *o);
+
+// Gateway-wide share totals, as the status page shows them
+void datum_stratum_count_share(bool accepted, uint64_t diff);
+
+// Per-miner accepted-work bookkeeping, swapped every minute, and the hashrate it implies
+void datum_stratum_stats_accepted(T_DATUM_STRATUM_USER_STATS *stats, uint64_t diff_accepted, uint64_t now_tsms);
+double datum_stratum_stats_th_sec(const T_DATUM_STRATUM_USER_STATS *stats);
 unsigned int datum_stratum_coinbase_index(const T_DATUM_STRATUM_THREADPOOL_DATA *sdata, const T_DATUM_MINER_DATA *miner, bool new_block);
 void stratum_job_merkle_root_calc(T_DATUM_STRATUM_JOB *s, unsigned char *coinbase_txn_hash, unsigned char *merkle_root_output);
 int assembleBlockAndSubmit(uint8_t *block_header, uint8_t *coinbase_txn, size_t coinbase_txn_size, T_DATUM_STRATUM_JOB *job, T_DATUM_STRATUM_THREADPOOL_DATA *sdata, const char *block_hash_hex, bool empty_work, const unsigned char *extranonce);
