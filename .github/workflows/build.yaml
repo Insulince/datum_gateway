@@ -57,6 +57,21 @@ jobs:
           - cmake_args: "-DENABLE_API=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_C_FLAGS=-DDATUM_API_FOR_UMBREL=ON"
             extra_cflags: "-DDATUM_API_FOR_UMBREL"
           - cmake_args: "-DENABLE_API=OFF"
+        # Stratum V2 needs libsecp256k1 0.4 or newer with its ellswift and schnorrsig modules,
+        # which these distributions package
+        include:
+          - { os: "ubuntu:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=gcc" } }
+          - { os: "ubuntu:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=clang" } }
+          - { os: "debian:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=gcc" } }
+          - { os: "debian:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=clang" } }
+          - { os: "debian:stable",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=gcc" } }
+          - { os: "debian:stable",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=clang" } }
+          - { os: "fedora:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=gcc" } }
+          - { os: "fedora:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=clang" } }
+          - { os: "alpine:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=gcc" } }
+          - { os: "alpine:latest",    config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=clang" } }
+          - { os: "archlinux:latest", config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=gcc" } }
+          - { os: "archlinux:latest", config: { cmake_args: "-DENABLE_API=ON -DENABLE_SV2=ON -DCMAKE_C_COMPILER=clang" } }
         exclude:
           # Clang configured for C11 rejects our C23 usage
           - os: debian:oldstable
@@ -103,6 +118,7 @@ jobs:
               INSTALL_CMD="apt update && apt install -y"
               PACKAGES="git libc6-dev cmake libcurl4-openssl-dev libjansson-dev libsodium-dev pkgconf"
               PACKAGES_API="libmicrohttpd-dev"
+              PACKAGES_SV2="libsecp256k1-dev"
               ;;
             almalinux:*|amazonlinux:*|fedora:*|oraclelinux:*)
               INSTALL_CMD="dnf install -y"
@@ -111,6 +127,7 @@ jobs:
               [[ "${{ matrix.os }}" =~ ^(alma|oracle)linux: ]] && INSTALL_CMD="dnf install -y epel-release && $INSTALL_CMD"
               PACKAGES="git cmake libcurl-devel jansson-devel libsodium-devel pkgconf"
               PACKAGES_API="libmicrohttpd-devel"
+              PACKAGES_SV2="libsecp256k1-devel"
               PACKAGES_GCC="$PACKAGES_GCC libasan libubsan"
               [[ "${{ matrix.config.cmake_args }}" =~ clang|gcc ]] || PACKAGES="$PACKAGES $PACKAGES_GCC"
               ;;
@@ -118,6 +135,7 @@ jobs:
               INSTALL_CMD="apk add --no-cache"
               PACKAGES="git build-base cmake argp-standalone curl-dev jansson-dev libsodium-dev compiler-rt"
               PACKAGES_API="libmicrohttpd-dev"
+              PACKAGES_SV2="libsecp256k1-dev"
 
               # musl only supports ASan with clang
               [[ "${{ matrix.config.cmake_args }}" =~ clang ]] || ASAN_CFLAGS=
@@ -126,6 +144,7 @@ jobs:
               INSTALL_CMD="pacman -Syu --noconfirm"
               PACKAGES="git base-devel cmake curl jansson libsodium"
               PACKAGES_API="libmicrohttpd"
+              PACKAGES_SV2="libsecp256k1"
               ;;
             gentoo/*)
               PKG_CACHE_DIR='/var/cache/binpkgs'
@@ -177,6 +196,9 @@ jobs:
           PACKAGES="$PACKAGES ${{ matrix.config.extra_deps }}"
           if [[ "${{ matrix.config.cmake_args }}" =~ ENABLE_API=ON ]]; then
               PACKAGES="$PACKAGES $PACKAGES_API"
+          fi
+          if [[ "${{ matrix.config.cmake_args }}" =~ ENABLE_SV2=ON ]]; then
+              PACKAGES="$PACKAGES $PACKAGES_SV2"
           fi
           if [[ "${{ matrix.config.cmake_args }}" =~ CMAKE_C_COMPILER=gcc ]]; then
               PACKAGES="$PACKAGES $PACKAGES_GCC"

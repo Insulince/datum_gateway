@@ -275,6 +275,8 @@ bool datum_stratum_job_blake2b_commitment_from_txn(const T_DATUM_STRATUM_JOB *s,
 bool datum_stratum_job_blake2b_commitment(T_DATUM_STRATUM_JOB *s, const T_DATUM_STRATUM_COINBASE *cb, bool subsidy_only, unsigned char pot, unsigned char *commitment, unsigned char *coinb1);
 bool datum_stratum_share_is_unmasked_block(
 	const T_DATUM_STRATUM_JOB *job, const unsigned char *share_hash);
+bool stratum_job_coinbaser_ready(T_DATUM_STRATUM_THREADPOOL_DATA *sdata, T_DATUM_STRATUM_JOB *job);
+
 // The 80-byte work a share describes: the commitment its coinbase makes, rooted with its
 // extranonce, then the job's prev hash and the share's nonce and time bytes.
 bool datum_stratum_share_work(const T_DATUM_STRATUM_JOB *job, const unsigned char *full_cb_txn, size_t full_cb_len, bool empty_work, const unsigned char *extranonce_bin, const unsigned char *nonce8, const unsigned char *ntime8, unsigned char *work);
@@ -310,6 +312,7 @@ typedef struct {
 	bool quickdiff;
 	uint64_t job_diff;
 	const unsigned char *target; // the share must meet this
+	bool stale_prevblock; // the share's job was replaced by a new block, besides job->is_stale_prevblock
 } T_DATUM_SHARE;
 
 // What the checks found besides the verdict: the share's hash (little-endian), whether it

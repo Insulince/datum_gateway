@@ -55,6 +55,7 @@
 #include "datum_utils.h"
 #include "datum_blocktemplates.h"
 #include "datum_stratum.h"
+#include "datum_sv2.h"
 #include "datum_conf.h"
 #include "datum_sockets.h"
 #include "datum_api.h"
@@ -92,6 +93,11 @@ void datum_protocol_tests(void);
 void datum_stratum_dupes_tests(void);
 void datum_utils_tests(void);
 void datum_submitblock_tests(void);
+#ifdef ENABLE_SV2
+void datum_sv2_msg_tests(void);
+void datum_sv2_noise_tests(void);
+void datum_sv2_tests(void);
+#endif
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	struct arguments *arguments = state->input;
@@ -124,6 +130,11 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 			datum_stratum_dupes_tests();
 			datum_stratum_tests();
 			datum_submitblock_tests();
+#ifdef ENABLE_SV2
+			datum_sv2_msg_tests();
+			datum_sv2_noise_tests();
+			datum_sv2_tests();
+#endif
 			exit(datum_test_failed);
 		default:
 			return ARGP_ERR_UNKNOWN;
@@ -155,6 +166,7 @@ int main(const int argc, const char * const * const argv) {
 	
 	struct arguments arguments;
 	pthread_t pthread_datum_stratum_v1;
+	pthread_t pthread_datum_stratum_v2;
 	pthread_t pthread_datum_gateway_template;
 	int i;
 	int fail_retries=0;
@@ -252,6 +264,11 @@ int main(const int argc, const char * const * const argv) {
 	DLOG_DEBUG("Starting Stratum v1 server");
 	datum_thread_create(&pthread_datum_stratum_v1, datum_stratum_v1_socket_server, NULL);
 	
+	if (datum_config.stratum_v2_listen_port) {
+		DLOG_DEBUG("Starting Stratum v2 server");
+		datum_thread_create(&pthread_datum_stratum_v2, datum_sv2_socket_server, NULL);
+	}
+	
 	// Randomize the reconnect delay from 5 to 20 seconds to prevent hammering the server
 	next_reconnect_attempt_ms = ( 5000 + (rand() % 15001) );
 
@@ -270,6 +287,11 @@ int main(const int argc, const char * const * const argv) {
 		if (i>=600) { // Roughly every 5 minutes spit out some stats to the log
 			i = datum_stratum_v1_global_subscriber_count();
 			DLOG_INFO("Server stats: %d client%s / %.2f Th/s", i, (i!=1)?"s":"", datum_stratum_v1_est_total_th_sec());
+			if (datum_config.stratum_v2_listen_port) {
+				T_DATUM_SV2_SUMMARY sv2;
+				datum_sv2_summary(&sv2);
+				DLOG_INFO("Stratum V2 stats: %d connection%s / %d channel%s / %.2f Th/s", sv2.connections, (sv2.connections!=1)?"s":"", sv2.channels, (sv2.channels!=1)?"s":"", sv2.th_sec);
+			}
 			i=0;
 		}
 		
@@ -281,9 +303,10 @@ int main(const int argc, const char * const * const argv) {
 		
 		if (datum_config.datum_pooled_mining_only && (fail_retries >= 2) && (!datum_protocol_is_active())) {
 			if (!rejecting_stratum) {
-				DLOG_WARN("Configured for pooled mining only, and connection lost to DATUM server!  Shutting down Stratum v1 server until DATUM connection reestablished.");
+				DLOG_WARN("Configured for pooled mining only, and connection lost to DATUM server!  Disconnecting all miners until DATUM connection reestablished.");
 				rejecting_stratum = true;
 				datum_stratum_v1_shutdown_all();
+				datum_sv2_shutdown_all();
 			}
 		} else {
 			rejecting_stratum = false;

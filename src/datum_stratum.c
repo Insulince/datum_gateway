@@ -1137,7 +1137,7 @@ T_DATUM_SHARE_RESULT datum_stratum_check_share(const T_DATUM_SHARE *s, T_DATUM_S
 	
 	// For ABW work the XOR key is withheld, so only Apex can classify a
 	// network candidate before disclosure.
-	if (job->is_stale_prevblock) {
+	if (job->is_stale_prevblock || s->stale_prevblock) {
 		// share is from a stale job
 		return DATUM_SHARE_STALE_BLOCK;
 	}

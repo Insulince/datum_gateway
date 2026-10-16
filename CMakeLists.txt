@@ -14,6 +14,7 @@ else()
 endif()
 
 option(ENABLE_API "Build API support." ON)
+option(ENABLE_SV2 "Build Stratum V2 Mining Protocol support." OFF)
 
 include(GNUInstallDirs)
 
@@ -71,6 +72,9 @@ pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(JANSSON REQUIRED jansson)
 if(ENABLE_API)
 pkg_check_modules(MICROHTTPD REQUIRED libmicrohttpd)
+endif()
+if(ENABLE_SV2)
+pkg_check_modules(SECP256K1 REQUIRED libsecp256k1>=0.4)
 endif()
 pkg_check_modules(SODIUM REQUIRED libsodium)
 find_package(Threads REQUIRED)
@@ -194,6 +198,24 @@ if(ENABLE_API)
 	target_compile_options(datum_gateway PUBLIC
 		-DENABLE_API
 		${MICROHTTPD_CFLAGS} ${MICROHTTPD_CFLAGS_OTHER}
+	)
+endif()
+
+if(ENABLE_SV2)
+	target_sources(datum_gateway PRIVATE
+		src/datum_sv2.c
+		src/datum_sv2_tests.c
+		src/datum_sv2_msg.c
+		src/datum_sv2_msg_tests.c
+		src/datum_sv2_noise.c
+		src/datum_sv2_noise_tests.c
+	)
+	target_include_directories(datum_gateway PRIVATE ${SECP256K1_INCLUDE_DIRS})
+	target_link_directories(datum_gateway PUBLIC ${SECP256K1_LIBRARY_DIRS})
+	target_link_libraries(datum_gateway PUBLIC ${SECP256K1_LIBRARIES} ${SECP256K1_LDFLAGS} ${SECP256K1_LDFLAGS_OTHER})
+	target_compile_options(datum_gateway PUBLIC
+		-DENABLE_SV2
+		${SECP256K1_CFLAGS} ${SECP256K1_CFLAGS_OTHER}
 	)
 endif()
 

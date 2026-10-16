@@ -58,6 +58,7 @@
 #include "datum_stratum.h"
 #include "datum_sockets.h"
 #include "datum_protocol.h"
+#include "datum_sv2.h"
 
 #include "web_resources.h"
 
@@ -649,6 +650,10 @@ enum MHD_Result datum_api_cmd(struct MHD_Connection *connection, char *post, siz
 									}
 									break;
 								}
+								if (!strcmp(cstr,"empty_sv2")) {
+									datum_sv2_shutdown_all();
+									break;
+								}
 								break;
 							}
 							case 'k': {
@@ -661,6 +666,21 @@ enum MHD_Result datum_api_cmd(struct MHD_Connection *connection, char *post, siz
 											const json_int_t cid_json_int = json_integer_value(param);
 											if (tid_json_int <= INT_MAX && cid_json_int <= INT_MAX) {
 												datum_api_cmd_kill_client((int)tid_json_int, (int)cid_json_int);
+											}
+										}
+									}
+									break;
+								}
+								if (!strcmp(cstr,"kill_sv2_client")) {
+									param = json_object_get(root, "tid");
+									if (json_is_integer(param)) {
+										const json_int_t tid_json_int = json_integer_value(param);
+										param = json_object_get(root, "cid");
+										if (json_is_integer(param)) {
+											const json_int_t cid_json_int = json_integer_value(param);
+											param = json_object_get(root, "t");
+											if (tid_json_int <= INT_MAX && cid_json_int <= INT_MAX && json_is_integer(param)) {
+												datum_sv2_kill_client((int)tid_json_int, (int)cid_json_int, (uint64_t)json_integer_value(param));
 											}
 										}
 									}
@@ -817,6 +837,19 @@ struct MHD_Response *datum_api_thread_dashboard_inner(const bool have_admin) {
 			buf_strcat(&output, ">Disconnect All</button></TD></TR>");
 		}
 	}
+	{
+		T_DATUM_SV2_SUMMARY sv2;
+		datum_sv2_summary(&sv2);
+		if (sv2.connections) {
+			buf_printf(&output, "<TR><TD>SV2</TD>  <TD>%d</TD>  <TD>%d</TD> <TD>%.2f Th/s</TD><TD><button ", sv2.connections, sv2.channels, sv2.th_sec);
+			if (have_admin) {
+				buf_strcat(&output, "onclick=\"sendPostRequest('/cmd', {cmd:'empty_sv2'}); return false;\"");
+			} else {
+				buf_strcat(&output, "disabled");
+			}
+			buf_strcat(&output, ">Disconnect All</button></TD></TR>");
+		}
+	}
 	buf_strcat(&output, "</TABLE>");
 	if (have_admin) {
 		buf_strcat(&output, "</form><script>");
@@ -881,13 +914,41 @@ static double datum_api_client_share_cells(struct buf * const out, const uint64_
 		buf_strcat(out, "<TD>N/A</TD>");
 	}
 	
-	if (coinbase_index < (sizeof(cbnames) / sizeof(cbnames[0]))) {
+	if (coinbase_index == DATUM_COINBASE_ID_EMPTY) {
+		buf_strcat(out, "<TD>Subsidy only</TD>");
+	} else if (coinbase_index < (sizeof(cbnames) / sizeof(cbnames[0]))) {
 		buf_printf(out, "<TD>%s</TD>", cbnames[coinbase_index]);
 	} else {
 		buf_strcat(out, "<TD>Unknown</TD>");
 	}
 	
 	return (((double)(tsms - stats->last_swap_tsms)/1000.0) < 180.0) ? hr : 0.0;
+}
+
+typedef struct {
+	struct buf *output;
+	uint64_t tsms;
+	double *thr;
+} T_DATUM_API_SV2_ROWS;
+
+// One clients-table row per Stratum V2 channel, in the SV1 rows' columns
+static void datum_api_sv2_client_row(const T_DATUM_SV2_CHANNEL_VIEW *v, void *arg) {
+	T_DATUM_API_SV2_ROWS * const r = arg;
+	struct buf * const out = r->output;
+	const T_DATUM_SV2_CHANNEL * const ch = v->channel;
+	char agent[192];
+	
+	buf_printf(out, "<TR><TD>SV2 %d/%d #%u</TD><TD>", v->tid, v->cid, (unsigned)ch->channel_id);
+	buf_strcat_html_escape(out, v->rem_host);
+	buf_strcat(out, "</TD><TD>");
+	buf_strcat_html_escape(out, ch->user_identity.s);
+	buf_strcat(out, "</TD>");
+	buf_printf(out, "<TD> <span style=\"font-family: monospace;\">%8.8x</span> %.1fs</TD>", ch->session_id, (double)(r->tsms - ch->open_tsms)/1000.0);
+	*r->thr += datum_api_client_share_cells(out, r->tsms, &ch->stats, ch->diff, ch->diff_accepted, ch->shares_accepted, ch->diff_rejected, ch->shares_rejected, v->coinbase_index);
+	snprintf(agent, sizeof(agent), "%s %s (Stratum V2, %s channel)", v->conn->vendor, v->conn->firmware, ch->standard ? "standard" : "extended");
+	buf_strcat(out, "<TD>");
+	buf_strcat_html_escape(out, agent);
+	buf_printf(out, "</TD><TD><button onclick=\"sendPostRequest('/cmd', {cmd:'kill_sv2_client',tid:%d,cid:%d,t:%lu}); return false;\">Kick</button></TD></TR>", v->tid, v->cid, (unsigned long)v->conn->connect_tsms);
 }
 
 enum MHD_Result datum_api_client_dashboard(struct MHD_Connection *connection) {
@@ -947,6 +1008,10 @@ enum MHD_Result datum_api_client_dashboard(struct MHD_Connection *connection) {
 		}
 	}
 	
+	{
+		T_DATUM_API_SV2_ROWS rows = { .output = &output, .tsms = tsms, .thr = &thr };
+		datum_sv2_foreach_channel(datum_api_sv2_client_row, &rows);
+	}
 	buf_printf(&output, "</TABLE></form><p class=\"table-footer\">Total active hashrate estimate: %.2f Th/s</p><script>", thr);
 	buf_printf(&output, www_assets_post_js, datum_config.api_csrf_token);
 	buf_strcat(&output, "</script>");
@@ -1707,6 +1772,14 @@ void datum_api_dash_stats(T_DATUM_API_DASH_VARS *dashdata) {
 		dashdata->STRATUM_TOTAL_CONNECTIONS = 0;
 		dashdata->STRATUM_TOTAL_SUBSCRIPTIONS = 0;
 		dashdata->STRATUM_HASHRATE_ESTIMATE = 0.0;
+	}
+	{
+		// Stratum V2 miners count alongside SV1: a connection each, a subscription per channel
+		T_DATUM_SV2_SUMMARY sv2;
+		datum_sv2_summary(&sv2);
+		dashdata->STRATUM_TOTAL_CONNECTIONS += sv2.connections;
+		dashdata->STRATUM_TOTAL_SUBSCRIPTIONS += sv2.channels;
+		dashdata->STRATUM_HASHRATE_ESTIMATE += sv2.th_sec;
 	}
 
 }

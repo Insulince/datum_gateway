@@ -129,6 +129,11 @@ typedef struct {
 	int stratum_v1_idle_timeout_no_share;
 	int stratum_v1_idle_timeout_max_last_work;
 	
+	char stratum_v2_listen_addr[128];
+	int stratum_v2_listen_port;
+	char stratum_v2_authority_secret_key[65];
+	int stratum_v2_cert_validity;
+	
 	void *stratum_username_mod;
 	
 	char mining_pool_address[256];

@@ -136,6 +136,38 @@ Note that the API/web admin password is also used for preventing CSRF attacks, s
 You should review the [documentation on usernames](doc/usernames.md) next.
 Once you have everything running, you can point miners at the Gateway.
 
+## Stratum V2 (optional)
+
+The Gateway can also serve miners over Stratum V2's Mining Protocol, on a second port next to
+Stratum V1. DATUM still builds every template: SV2's Job Declaration and Template Distribution
+protocols are not supported, and a miner asking to choose its own work is refused. The work
+format is XBT's, described in [doc/sv2_xbt.md](doc/sv2_xbt.md).
+
+It is compiled out by default. To build it, install libsecp256k1 0.4 or newer, with its
+ellswift and schnorrsig modules (Debian 13 and newer ship it as `libsecp256k1-dev`), then:
+
+    cmake -DENABLE_SV2=ON . && make
+
+To turn it on, add a `stratum_v2` section to the configuration:
+
+    "stratum_v2": {
+        "listen_port": 23336,
+        "authority_secret_key": "64 hex characters"
+    }
+
+- **`authority_secret_key`** signs the Gateway's Noise certificates. Generate one with
+  `openssl rand -hex 32`, and keep it as private as the RPC password. The Gateway checks it
+  at startup, then logs the matching public key: configure that key on your miners, so they
+  connect only to this Gateway.
+- **`listen_addr`** and **`cert_validity_seconds`** are optional.
+- **Shared settings.** SV2 miners use the `stratum` section's vardiff, idle timeout and share
+  staleness settings, and the pool's minimum difficulty, the same as SV1 miners.
+
+Limitations:
+- Up to 256 SV2 connections, with up to 16 channels each. These limits are fixed.
+- The PROXY protocol (`trust_proxy`) applies to Stratum V1 only.
+- XBT work only. A device built for SHA256d's SV2 layouts cannot mine here, as with Stratum V1.
+
 ## Docker
 
 The DATUM Gateway is also available as a Docker image.

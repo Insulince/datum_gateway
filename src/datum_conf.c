@@ -51,6 +51,7 @@
 #include "datum_jsonrpc.h"
 #include "datum_utils.h"
 #include "datum_sockets.h"
+#include "datum_sv2.h"
 
 global_config_t datum_config;
 
@@ -115,6 +116,14 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
 	{ .var_type = DATUM_CONF_INT, 		.category = "stratum", 		.name = "idle_timeout_max_last_work",	.description = "Seconds we allow a subscribed connection to be idle since its last accepted share? (0 disables)",
 		.required = false, .ptr = &datum_config.stratum_v1_idle_timeout_max_last_work, 	.default_int = 0 },
 	{ .var_type = DATUM_CONF_USERNAME_MODS, .category = "stratum", .name = "username_modifiers", .description = "Modifiers to redirect some portion of shares to alternate usernames", .required = false, .ptr = &datum_config.stratum_username_mod, },
+	{ .var_type = DATUM_CONF_STRING, 	.category = "stratum_v2", 	.name = "listen_addr",					.description = "IP address to listen for Stratum V2 connections",
+		.required = false, .ptr = datum_config.stratum_v2_listen_addr,				.default_string[0] = "", .max_string_len = sizeof(datum_config.stratum_v2_listen_addr) },
+	{ .var_type = DATUM_CONF_INT, 		.category = "stratum_v2", 	.name = "listen_port",				.description = "Listening port for Stratum V2 (0=disabled; requires a build with ENABLE_SV2)",
+		.required = false, .ptr = &datum_config.stratum_v2_listen_port, 				.default_int = 0 },
+	{ .var_type = DATUM_CONF_STRING, 	.category = "stratum_v2", 	.name = "authority_secret_key",		.description = "Hex secp256k1 secret key that signs this gateway's Noise certificates; miners pin its public key (required when listen_port is set)",
+		.required = false, .ptr = datum_config.stratum_v2_authority_secret_key,		.default_string[0] = "", .max_string_len = sizeof(datum_config.stratum_v2_authority_secret_key) },
+	{ .var_type = DATUM_CONF_INT, 		.category = "stratum_v2", 	.name = "cert_validity_seconds",	.description = "Validity window of each Noise certificate, in seconds",
+		.required = false, .ptr = &datum_config.stratum_v2_cert_validity, 			.default_int = 3600 },
 	
 	// mining settings
 	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "pool_address",				.description = "Bitcoin address used for mining rewards.",
@@ -676,6 +685,24 @@ int datum_read_config(const char *conffile) {
 		unsigned char hash[32];
 		my_sha256(hash, data, data_sz);
 		hash2hex(hash, datum_config.api_csrf_token);
+	}
+#endif
+	
+#ifndef ENABLE_SV2
+	if (datum_config.stratum_v2_listen_port) {
+		DLOG_WARN("Stratum V2 is enabled in configuration, but this build was compiled without Stratum V2 support; ignoring it");
+		datum_config.stratum_v2_listen_port = 0;
+	}
+#else
+	if (datum_config.stratum_v2_listen_port) {
+		if (!datum_sv2_authority_key_valid(datum_config.stratum_v2_authority_secret_key)) {
+			DLOG_FATAL("stratum_v2.authority_secret_key must be 64 hex characters naming a valid secp256k1 secret key when stratum_v2.listen_port is set.");
+			return 0;
+		}
+		if (datum_config.stratum_v2_cert_validity < 60) {
+			DLOG_FATAL("stratum_v2.cert_validity_seconds must be at least 60.");
+			return 0;
+		}
 	}
 #endif
 	
